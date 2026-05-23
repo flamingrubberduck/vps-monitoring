@@ -1,18 +1,13 @@
 import { redirect } from 'next/navigation';
-import { connectDB } from './db';
-import { User } from './models/User';
+import { getDb } from './db';
+import { users } from './schema';
 
-/** DB query only — use from API routes (return 503 on failure). Do not redirect. */
 export async function querySetupComplete(): Promise<boolean> {
-  await connectDB();
-  const count = await User.countDocuments({});
-  return count > 0;
+  const db   = getDb();
+  const rows = await db.select({ id: users.id }).from(users).limit(1);
+  return rows.length > 0;
 }
 
-/**
- * For Server Components / layouts. On DB failure redirects to /service-unavailable
- * (instead of a cryptic “Application error” page).
- */
 export async function isSetupComplete(): Promise<boolean> {
   try {
     return await querySetupComplete();

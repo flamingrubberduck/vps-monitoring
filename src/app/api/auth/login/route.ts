@@ -1,7 +1,8 @@
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
-import { connectDB } from '@/lib/db';
-import { User } from '@/lib/models/User';
+import { eq } from 'drizzle-orm';
+import { getDb } from '@/lib/db';
+import { users, teamMembers } from '@/lib/schema';
 import { verifyPassword, signSession, setSessionCookie } from '@/lib/auth';
 
 export const runtime = 'nodejs';
@@ -12,14 +13,20 @@ const schema = z.object({
 });
 
 export async function POST(req: Request) {
-  const body = await req.json().catch(() => null);
+  const body   = await req.json().catch(() => null);
   const parsed = schema.safeParse(body);
   if (!parsed.success) {
     return NextResponse.json({ error: 'Invalid input' }, { status: 400 });
   }
 
-  await connectDB();
-  const user = await User.findOne({ username: parsed.data.username.toLowerCase() });
+  const db   = getDb();
+  const rows = await db
+    .select()
+    .from(users)
+    .where(eq(users.username, parsed.data.username.toLowerCase()))
+    .limit(1);
+
+  const user = rows[0];
   if (!user) {
     return NextResponse.json({ error: 'Invalid credentials' }, { status: 401 });
   }
@@ -29,10 +36,21 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: 'Invalid credentials' }, { status: 401 });
   }
 
+  const membership = await db
+    .select()
+    .from(teamMembers)
+    .where(eq(teamMembers.userId, user.id))
+    .limit(1);
+
+  if (!membership[0]) {
+    return NextResponse.json({ error: 'No team assigned to this user' }, { status: 403 });
+  }
+
   const token = await signSession({
-    sub: user._id.toString(),
+    sub:      user.id,
     username: user.username,
-    role: 'admin',
+    teamId:   membership[0].teamId,
+    role:     membership[0].role,
   });
   await setSessionCookie(token);
 

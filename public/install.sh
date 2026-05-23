@@ -10,6 +10,7 @@
 #   - Drops the agent script into /opt/vps-monitor-agent/
 #   - Registers with the dashboard (auto-generates agentId + token)
 #   - Installs and starts a systemd service that survives reboots
+#   - If Docker is detected, also installs a Docker stats collector service
 # ==============================================================================
 set -euo pipefail
 
@@ -18,8 +19,10 @@ INTERVAL="__INTERVAL__"
 INSTALL_DIR="/opt/vps-monitor-agent"
 CONFIG_FILE="$INSTALL_DIR/agent.conf"
 AGENT_SCRIPT="$INSTALL_DIR/agent.sh"
+DOCKER_AGENT_SCRIPT="$INSTALL_DIR/docker-agent.sh"
 UNINSTALL_SCRIPT="$INSTALL_DIR/uninstall.sh"
 SERVICE_FILE="/etc/systemd/system/vps-monitor-agent.service"
+DOCKER_SERVICE_FILE="/etc/systemd/system/vps-monitor-docker-agent.service"
 
 c_blue=$'\e[1;34m'; c_green=$'\e[1;32m'; c_yellow=$'\e[1;33m'; c_red=$'\e[1;31m'; c_reset=$'\e[0m'
 log()  { printf '%s==>%s %s\n' "$c_blue"   "$c_reset" "$*"; }
@@ -182,6 +185,22 @@ get_disk() {
   df -B1 --output=used,size / 2>/dev/null | tail -1
 }
 
+get_extra_disks_json() {
+  # Returns a JSON array of {mount, usedBytes, totalBytes} for all real non-root mounts
+  local json="[]"
+  while IFS= read -r line; do
+    local used size mount
+    used=$(echo "$line" | awk '{print $1}')
+    size=$(echo "$line" | awk '{print $2}')
+    mount=$(echo "$line" | awk '{print $3}')
+    [ -z "$mount" ] || [ "$mount" = "/" ] && continue
+    entry=$(jq -n --arg m "$mount" --argjson u "${used:-0}" --argjson t "${size:-0}" \
+      '{mount:$m, usedBytes:$u, totalBytes:$t}')
+    json=$(echo "$json" | jq --argjson e "$entry" '. + [$e]')
+  done < <(df -B1 --output=used,size,target 2>/dev/null | tail -n +2 | grep -v '^[[:space:]]*0 ' | awk '$3 ~ /^\/(data|mnt|home|var|boot|opt|srv|storage)/' )
+  echo "$json"
+}
+
 # Prime CPU + net counters once
 read PREV_CPU_TOTAL PREV_CPU_IDLE <<<"$(read_cpu)"
 read PREV_RX PREV_TX <<<"$(read_net)"
@@ -221,6 +240,9 @@ while true; do
   # Disk on /
   read DISK_USED DISK_TOTAL <<<"$(get_disk)"
 
+  # Extra mount points
+  EXTRA_DISKS_JSON="$(get_extra_disks_json)"
+
   # Network
   read RX TX <<<"$(read_net)"
   RX_DELTA=$(( RX - PREV_RX ))
@@ -250,13 +272,14 @@ while true; do
     --argjson swapTotalBytes "$SWAP_TOTAL" \
     --argjson diskUsedBytes  "$DISK_USED" \
     --argjson diskTotalBytes "$DISK_TOTAL" \
+    --argjson extraDisks     "$EXTRA_DISKS_JSON" \
     --argjson netRxBytes "$RX" \
     --argjson netTxBytes "$TX" \
     --argjson netRxBps   "$RX_BPS" \
     --argjson netTxBps   "$TX_BPS" \
     --argjson uptimeSeconds "$UPTIME" \
     --argjson processCount  "$PROC_COUNT" \
-    '{agentId:$agentId, token:$token, cpuPercent:$cpuPercent, loadAvg1:$loadAvg1, loadAvg5:$loadAvg5, loadAvg15:$loadAvg15, memUsedBytes:$memUsedBytes, memTotalBytes:$memTotalBytes, swapUsedBytes:$swapUsedBytes, swapTotalBytes:$swapTotalBytes, diskUsedBytes:$diskUsedBytes, diskTotalBytes:$diskTotalBytes, netRxBytes:$netRxBytes, netTxBytes:$netTxBytes, netRxBps:$netRxBps, netTxBps:$netTxBps, uptimeSeconds:$uptimeSeconds, processCount:$processCount}')
+    '{agentId:$agentId, token:$token, cpuPercent:$cpuPercent, loadAvg1:$loadAvg1, loadAvg5:$loadAvg5, loadAvg15:$loadAvg15, memUsedBytes:$memUsedBytes, memTotalBytes:$memTotalBytes, swapUsedBytes:$swapUsedBytes, swapTotalBytes:$swapTotalBytes, diskUsedBytes:$diskUsedBytes, diskTotalBytes:$diskTotalBytes, extraDisks:$extraDisks, netRxBytes:$netRxBytes, netTxBytes:$netTxBytes, netRxBps:$netRxBps, netTxBps:$netTxBps, uptimeSeconds:$uptimeSeconds, processCount:$processCount}')
 
   curl -fsS --max-time 10 -X POST "$SERVER_URL/api/agents/heartbeat" \
     -H 'Content-Type: application/json' \
@@ -267,20 +290,6 @@ done
 AGENT_EOF
 
 chmod +x "$AGENT_SCRIPT"
-
-# ---- Write uninstall script -------------------------------------------------
-cat > "$UNINSTALL_SCRIPT" <<'UNI_EOF'
-#!/usr/bin/env bash
-set -e
-[ "$(id -u)" -eq 0 ] || { echo "Run as root."; exit 1; }
-systemctl stop vps-monitor-agent 2>/dev/null || true
-systemctl disable vps-monitor-agent 2>/dev/null || true
-rm -f /etc/systemd/system/vps-monitor-agent.service
-systemctl daemon-reload || true
-rm -rf /opt/vps-monitor-agent
-echo "vps-monitor-agent removed."
-UNI_EOF
-chmod +x "$UNINSTALL_SCRIPT"
 
 # ---- systemd service --------------------------------------------------------
 log "Installing systemd service…"
@@ -315,11 +324,272 @@ else
   warn "Agent service is not active. Run: journalctl -u vps-monitor-agent -n 50"
 fi
 
+# ---- Docker stats agent (optional, only if Docker is available) ---------------
+DOCKER_ENABLED=false
+if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+  log "Docker detected — installing Docker stats collector…"
+  DOCKER_ENABLED=true
+
+  cat > "$DOCKER_AGENT_SCRIPT" <<'DOCKER_EOF'
+#!/usr/bin/env bash
+# vps-monitor-docker-agent: collects Docker container stats + static config.
+set -u
+
+CONFIG_FILE="/opt/vps-monitor-agent/agent.conf"
+# shellcheck disable=SC1090
+. "$CONFIG_FILE"
+
+HASH_CACHE_FILE="/opt/vps-monitor-agent/docker-hashes.conf"
+touch "$HASH_CACHE_FILE"
+
+# Load hash cache: containerId=hash pairs, one per line
+load_hash() { grep "^${1}=" "$HASH_CACHE_FILE" 2>/dev/null | cut -d= -f2-; }
+save_hash()  {
+  local cid="$1" hash="$2"
+  # Remove old entry and append new one (handles first write and updates)
+  local tmp
+  tmp=$(grep -v "^${cid}=" "$HASH_CACHE_FILE" 2>/dev/null || true)
+  printf '%s\n%s=%s\n' "$tmp" "$cid" "$hash" > "$HASH_CACHE_FILE"
+}
+
+parse_bytes() {
+  local raw="${1:-0}"
+  local num unit
+  num=$(echo "$raw" | grep -oE '[0-9]+(\.[0-9]+)?')
+  unit=$(echo "$raw" | grep -oE '[kKmMgGtT]?i?[bB]$' || echo "B")
+  awk -v n="${num:-0}" -v u="$unit" 'BEGIN{
+    if(u~/[Gg]/) print int(n*1073741824)
+    else if(u~/[Mm]/) print int(n*1048576)
+    else if(u~/[Kk]/) print int(n*1024)
+    else print int(n)
+  }'
+}
+
+while true; do
+  STATS_ENTRIES="[]"
+  DETAIL_ENTRIES="[]"
+
+  mapfile -t CONTAINER_IDS < <(docker ps -aq 2>/dev/null || true)
+
+  if [ "${#CONTAINER_IDS[@]}" -gt 0 ]; then
+    for CID in "${CONTAINER_IDS[@]}"; do
+
+      # ── Full inspect (single call per container) ────────────────────────────
+      INSP_JSON=$(docker inspect "$CID" 2>/dev/null) || continue
+      [ "$INSP_JSON" = "null" ] || [ -z "$INSP_JSON" ] && continue
+
+      SHORT_ID=$(echo "$INSP_JSON" | jq -r '.[0].Id[:12]')
+      NAME=$(echo "$INSP_JSON"     | jq -r '.[0].Name | ltrimstr("/")')
+      IMAGE=$(echo "$INSP_JSON"    | jq -r '.[0].Config.Image')
+      IMAGE_ID=$(echo "$INSP_JSON" | jq -r '.[0].Image[:12]')
+      STATUS=$(echo "$INSP_JSON"   | jq -r '.[0].State.Status')
+      RESTART_COUNT=$(echo "$INSP_JSON" | jq -r '.[0].RestartCount')
+      CREATED_AT=$(echo "$INSP_JSON"    | jq -r '.[0].Created')
+
+      # Entrypoint + Cmd joined into a readable command string
+      COMMAND=$(echo "$INSP_JSON" | jq -r '
+        (.[0].Config.Entrypoint // [] | join(" ")) as $ep |
+        (.[0].Config.Cmd // [] | join(" ")) as $cmd |
+        if $ep != "" and $cmd != "" then "\($ep) \($cmd)"
+        elif $ep != "" then $ep
+        else $cmd end')
+
+      RESTART_POLICY=$(echo "$INSP_JSON" | jq -r '.[0].HostConfig.RestartPolicy.Name // ""')
+      NETWORK_MODE=$(echo "$INSP_JSON"   | jq -r '.[0].HostConfig.NetworkMode // ""')
+
+      # Ports: [{hostIp, hostPort, containerPort, protocol}]
+      PORTS=$(echo "$INSP_JSON" | jq -c '
+        [ .[0].NetworkSettings.Ports // {} |
+          to_entries[] |
+          select(.value != null) |
+          .key as $k |
+          ($k | split("/")) as $parts |
+          .value[] |
+          { hostIp: (.HostIp // ""),
+            hostPort: (.HostPort // ""),
+            containerPort: $parts[0],
+            protocol: ($parts[1] // "tcp") }
+        ]')
+
+      # Volumes: [{source, destination, mode}]
+      VOLUMES=$(echo "$INSP_JSON" | jq -c '
+        [ .[0].Mounts // [] |
+          .[] |
+          { source: (.Source // ""),
+            destination: (.Destination // ""),
+            mode: (.Mode // "") }
+        ]')
+
+      # Env vars: ["KEY=value", ...]
+      ENV_VARS=$(echo "$INSP_JSON" | jq -c '.[0].Config.Env // []')
+
+      # Labels: {key: value}
+      LABELS=$(echo "$INSP_JSON" | jq -c '.[0].Config.Labels // {}')
+
+      # Networks: [{name, ipAddress}]
+      NETWORKS=$(echo "$INSP_JSON" | jq -c '
+        [ .[0].NetworkSettings.Networks // {} |
+          to_entries[] |
+          { name: .key,
+            ipAddress: (.value.IPAddress // "") }
+        ]')
+
+      # ── Config hash for change detection ───────────────────────────────────
+      # Hash covers all static fields (anything that changes on recreate/update)
+      HASH_INPUT="${IMAGE}|${IMAGE_ID}|${COMMAND}|${RESTART_POLICY}|${NETWORK_MODE}|${PORTS}|${VOLUMES}|${ENV_VARS}|${LABELS}|${NETWORKS}"
+      NEW_HASH=$(printf '%s' "$HASH_INPUT" | sha256sum | awk '{print $1}')
+      OLD_HASH=$(load_hash "$SHORT_ID")
+
+      if [ "$NEW_HASH" != "$OLD_HASH" ]; then
+        DETAIL=$(jq -n \
+          --arg  containerId   "$SHORT_ID" \
+          --arg  name          "$NAME" \
+          --arg  image         "$IMAGE" \
+          --arg  imageId       "$IMAGE_ID" \
+          --arg  command       "$COMMAND" \
+          --arg  createdAt     "$CREATED_AT" \
+          --arg  restartPolicy "$RESTART_POLICY" \
+          --arg  networkMode   "$NETWORK_MODE" \
+          --argjson ports      "$PORTS" \
+          --argjson volumes    "$VOLUMES" \
+          --argjson envVars    "$ENV_VARS" \
+          --argjson labels     "$LABELS" \
+          --argjson networks   "$NETWORKS" \
+          --arg  configHash    "$NEW_HASH" \
+          '{containerId:$containerId, name:$name, image:$image, imageId:$imageId,
+            command:$command, createdAt:$createdAt, restartPolicy:$restartPolicy,
+            networkMode:$networkMode, ports:$ports, volumes:$volumes, envVars:$envVars,
+            labels:$labels, networks:$networks, configHash:$configHash}')
+        DETAIL_ENTRIES=$(echo "$DETAIL_ENTRIES" | jq --argjson d "$DETAIL" '. + [$d]')
+        save_hash "$SHORT_ID" "$NEW_HASH"
+      fi
+
+      # ── Runtime stats (running containers only) ─────────────────────────────
+      if [ "$STATUS" = "running" ]; then
+        STATS=$(docker stats --no-stream --format \
+          '{"cpuPct":"{{.CPUPerc}}","memUsage":"{{.MemUsage}}","netIO":"{{.NetIO}}","blockIO":"{{.BlockIO}}"}' \
+          "$CID" 2>/dev/null) || STATS='{}'
+
+        CPU_PCT=$(echo "$STATS" | jq -r '.cpuPct // "0%"' | tr -d '%')
+        [ -z "$CPU_PCT" ] || [ "$CPU_PCT" = "null" ] && CPU_PCT=0
+
+        MEM_USED=$(parse_bytes "$(echo "$STATS" | jq -r '.memUsage // "0B / 0B"' | awk -F' / ' '{print $1}')")
+        MEM_LIM=$(parse_bytes  "$(echo "$STATS" | jq -r '.memUsage // "0B / 0B"' | awk -F' / ' '{print $2}')")
+        NET_RX=$(parse_bytes   "$(echo "$STATS" | jq -r '.netIO    // "0B / 0B"' | awk -F' / ' '{print $1}')")
+        NET_TX=$(parse_bytes   "$(echo "$STATS" | jq -r '.netIO    // "0B / 0B"' | awk -F' / ' '{print $2}')")
+        BLK_R=$(parse_bytes    "$(echo "$STATS" | jq -r '.blockIO  // "0B / 0B"' | awk -F' / ' '{print $1}')")
+        BLK_W=$(parse_bytes    "$(echo "$STATS" | jq -r '.blockIO  // "0B / 0B"' | awk -F' / ' '{print $2}')")
+      else
+        CPU_PCT=0; MEM_USED=0; MEM_LIM=0
+        NET_RX=0; NET_TX=0; BLK_R=0; BLK_W=0
+      fi
+
+      STAT_ENTRY=$(jq -n \
+        --arg  containerId     "$SHORT_ID" \
+        --arg  name            "$NAME" \
+        --arg  image           "$IMAGE" \
+        --arg  status          "$STATUS" \
+        --argjson cpuPercent      "$CPU_PCT" \
+        --argjson memUsedBytes    "$MEM_USED" \
+        --argjson memLimitBytes   "$MEM_LIM" \
+        --argjson netRxBytes      "$NET_RX" \
+        --argjson netTxBytes      "$NET_TX" \
+        --argjson blockReadBytes  "$BLK_R" \
+        --argjson blockWriteBytes "$BLK_W" \
+        --argjson restartCount    "$RESTART_COUNT" \
+        '{containerId:$containerId, name:$name, image:$image, status:$status,
+          cpuPercent:$cpuPercent, memUsedBytes:$memUsedBytes, memLimitBytes:$memLimitBytes,
+          netRxBytes:$netRxBytes, netTxBytes:$netTxBytes,
+          blockReadBytes:$blockReadBytes, blockWriteBytes:$blockWriteBytes,
+          restartCount:$restartCount}')
+
+      STATS_ENTRIES=$(echo "$STATS_ENTRIES" | jq --argjson e "$STAT_ENTRY" '. + [$e]')
+    done
+  fi
+
+  # Only include details key when there are changed containers
+  if [ "$(echo "$DETAIL_ENTRIES" | jq 'length')" -gt 0 ]; then
+    PAYLOAD=$(jq -n \
+      --arg  agentId    "$AGENT_ID" \
+      --arg  token      "$AGENT_TOKEN" \
+      --argjson containers "$STATS_ENTRIES" \
+      --argjson details    "$DETAIL_ENTRIES" \
+      '{agentId:$agentId, token:$token, containers:$containers, details:$details}')
+  else
+    PAYLOAD=$(jq -n \
+      --arg  agentId    "$AGENT_ID" \
+      --arg  token      "$AGENT_TOKEN" \
+      --argjson containers "$STATS_ENTRIES" \
+      '{agentId:$agentId, token:$token, containers:$containers}')
+  fi
+
+  curl -fsS --max-time 15 -X POST "$SERVER_URL/api/agents/heartbeat-docker" \
+    -H 'Content-Type: application/json' \
+    -d "$PAYLOAD" >/dev/null 2>&1 || true
+
+  sleep "$INTERVAL"
+done
+DOCKER_EOF
+
+  chmod +x "$DOCKER_AGENT_SCRIPT"
+
+  cat > "$DOCKER_SERVICE_FILE" <<EOF
+[Unit]
+Description=VPS Monitor Docker Stats Agent
+After=docker.service vps-monitor-agent.service
+Wants=docker.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/env bash $DOCKER_AGENT_SCRIPT
+Restart=always
+RestartSec=10
+User=root
+StandardOutput=journal
+StandardError=journal
+KillMode=control-group
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  systemctl daemon-reload
+  systemctl enable vps-monitor-docker-agent >/dev/null 2>&1
+  systemctl restart vps-monitor-docker-agent
+
+  sleep 2
+  if systemctl is-active --quiet vps-monitor-docker-agent; then
+    ok "Docker agent is running."
+  else
+    warn "Docker agent service is not active. Run: journalctl -u vps-monitor-docker-agent -n 50"
+  fi
+fi
+
+# ---- Update uninstall script to also remove Docker agent ---------------------
+cat > "$UNINSTALL_SCRIPT" <<'UNI_EOF'
+#!/usr/bin/env bash
+set -e
+[ "$(id -u)" -eq 0 ] || { echo "Run as root."; exit 1; }
+for svc in vps-monitor-docker-agent vps-monitor-agent; do
+  systemctl stop "$svc" 2>/dev/null || true
+  systemctl disable "$svc" 2>/dev/null || true
+done
+rm -f /etc/systemd/system/vps-monitor-agent.service
+rm -f /etc/systemd/system/vps-monitor-docker-agent.service
+systemctl daemon-reload || true
+rm -rf /opt/vps-monitor-agent
+echo "vps-monitor-agent removed."
+UNI_EOF
+chmod +x "$UNINSTALL_SCRIPT"
+
 echo
 echo "${c_green}✔ Installation complete!${c_reset}"
 echo "  Agent ID:      $AGENT_ID"
 echo "  Dashboard:     $SERVER_URL"
 echo "  Status:        sudo systemctl status vps-monitor-agent"
 echo "  Logs:          sudo journalctl -u vps-monitor-agent -f"
+if [ "$DOCKER_ENABLED" = "true" ]; then
+  echo "  Docker stats:  sudo systemctl status vps-monitor-docker-agent"
+fi
 echo "  Uninstall:     sudo $UNINSTALL_SCRIPT"
 echo

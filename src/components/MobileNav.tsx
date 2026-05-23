@@ -2,14 +2,16 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { LayoutDashboard, Server, Settings } from 'lucide-react';
+import { Activity, Bell, LayoutDashboard, Server, Settings } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { ThemeToggle } from '@/components/ThemeToggle';
 
 const NAV = [
-  { href: '/dashboard', label: 'Home', icon: LayoutDashboard },
-  { href: '/servers', label: 'Servers', icon: Server },
-  { href: '/settings', label: 'Settings', icon: Settings },
+  { href: '/dashboard', label: 'Home',     icon: LayoutDashboard },
+  { href: '/servers',   label: 'Servers',  icon: Server },
+  { href: '/uptime',    label: 'Uptime',   icon: Activity },
+  { href: '/alerts',    label: 'Alerts',   icon: Bell },
+  { href: '/settings',  label: 'Settings', icon: Settings },
 ];
 
 export function MobileNav() {

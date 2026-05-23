@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { LayoutDashboard, Server, Settings, LogOut, BookOpen } from 'lucide-react';
+import { Activity, Bell, LayoutDashboard, Server, Settings, LogOut, BookOpen } from 'lucide-react';
 import { Logo } from './Logo';
 import { ThemeToggle } from './ThemeToggle';
 import { cn } from '@/lib/utils';
@@ -11,11 +11,13 @@ import { useRouter } from 'next/navigation';
 
 const NAV = [
   { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
-  { href: '/servers', label: 'Servers', icon: Server },
-  { href: '/settings', label: 'Settings', icon: Settings },
+  { href: '/servers',   label: 'Servers',   icon: Server },
+  { href: '/uptime',    label: 'Uptime',    icon: Activity },
+  { href: '/alerts',    label: 'Alerts',    icon: Bell },
+  { href: '/settings',  label: 'Settings',  icon: Settings },
 ];
 
-export function Sidebar({ username }: { username: string }) {
+export function Sidebar({ username, role }: { username: string; role?: string }) {
   const pathname = usePathname();
   const router = useRouter();
 
@@ -65,7 +67,7 @@ export function Sidebar({ username }: { username: string }) {
         <div className="flex items-center justify-between rounded-lg bg-bg-muted/60 px-3 py-2.5">
           <div className="min-w-0">
             <div className="truncate text-sm font-medium text-ink">{username}</div>
-            <div className="text-xs text-ink-soft">Administrator</div>
+            <div className="text-xs capitalize text-ink-soft">{role ?? 'member'}</div>
           </div>
           <div className="flex shrink-0 items-center gap-0.5">
             <ThemeToggle />

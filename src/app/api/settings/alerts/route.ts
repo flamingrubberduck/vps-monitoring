@@ -11,13 +11,27 @@ export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 const putSchema = z.object({
-  telegramBotToken: z.string().max(512).optional(),
-  clearTelegramBotToken: z.boolean().optional(),
-  telegramChatId: z.string().max(64).optional(),
-  alertCpuPercent: z.number().int().min(1).max(100).optional(),
-  alertRamPercent: z.number().int().min(1).max(100).optional(),
-  alertDiskPercent: z.number().int().min(1).max(100).optional(),
-  telegramCooldownSeconds: z.number().int().min(60).max(86_400).optional(),
+  // Telegram
+  telegramBotToken:     z.string().max(512).optional(),
+  clearTelegramBotToken:z.boolean().optional(),
+  telegramChatId:       z.string().max(64).optional(),
+  // Email
+  smtpHost:     z.string().max(253).optional(),
+  smtpPort:     z.number().int().min(1).max(65535).optional(),
+  smtpUser:     z.string().max(253).optional(),
+  smtpPassword: z.string().max(512).optional(),
+  smtpFrom:     z.string().max(253).optional(),
+  smtpTo:       z.string().max(253).optional(),
+  // Slack / Discord / Webhook
+  slackWebhookUrl:   z.string().max(512).optional(),
+  discordWebhookUrl: z.string().max(512).optional(),
+  webhookUrl:        z.string().max(512).optional(),
+  webhookSecret:     z.string().max(256).optional(),
+  // Legacy thresholds
+  alertCpuPercent:        z.number().int().min(1).max(100).optional(),
+  alertRamPercent:        z.number().int().min(1).max(100).optional(),
+  alertDiskPercent:       z.number().int().min(1).max(100).optional(),
+  telegramCooldownSeconds:z.number().int().min(60).max(86_400).optional(),
 });
 
 export async function GET() {

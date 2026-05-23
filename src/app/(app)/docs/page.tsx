@@ -42,6 +42,11 @@ export default function DocsPage() {
             that survives reboots.
           </li>
           <li>Reports CPU, memory, disk, network, load and uptime every 15s by default.</li>
+          <li>
+            If Docker is detected on the VPS, also installs a{' '}
+            <code className="text-ink-muted">vps-monitor-docker-agent</code> service that reports
+            per-container CPU, memory, network and block I/O.
+          </li>
         </ul>
       </Section>
 
@@ -66,9 +71,9 @@ export default function DocsPage() {
             <strong className="text-ink">Web:</strong> Next.js 14 App Router (this app).
           </li>
           <li>
-            <strong className="text-ink">Database:</strong> MongoDB, two collections{' '}
-            <code className="text-ink-muted">agents</code> &{' '}
-            <code className="text-ink-muted">metrics</code>.
+            <strong className="text-ink">Database:</strong> TimescaleDB (Postgres). Hypertables:{' '}
+            <code className="text-ink-muted">metrics</code> and{' '}
+            <code className="text-ink-muted">container_metrics</code>.
           </li>
           <li>
             <strong className="text-ink">Agent:</strong> Tiny bash script using{' '}
@@ -90,11 +95,21 @@ export default function DocsPage() {
             path="/api/agents/heartbeat"
             desc="Agent posts a metric snapshot every N seconds (auth via token)."
           />
-          <Endpoint method="GET" path="/api/agents" desc="List all agents (admin only)." />
+          <Endpoint
+            method="POST"
+            path="/api/agents/heartbeat-docker"
+            desc="Docker agent posts per-container stats each interval (auth via token)."
+          />
+          <Endpoint method="GET" path="/api/agents" desc="List all agents (team-scoped)." />
           <Endpoint
             method="GET"
             path="/api/agents/:id/metrics"
             desc="Time-series metrics for a single VPS."
+          />
+          <Endpoint
+            method="GET"
+            path="/api/agents/:id/containers"
+            desc="Latest container snapshot for a VPS (last 5 minutes)."
           />
         </div>
       </Section>

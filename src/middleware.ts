@@ -4,7 +4,7 @@ import { env } from '@/lib/env';
 
 const COOKIE_NAME = 'vpsmon_session';
 
-const PROTECTED_ROUTES = ['/dashboard', '/servers', '/settings'];
+const PROTECTED_ROUTES = ['/dashboard', '/servers', '/settings', '/alerts'];
 const AUTH_ROUTES = ['/login'];
 
 async function isAuthed(req: NextRequest): Promise<boolean> {

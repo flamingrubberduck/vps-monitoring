@@ -4,6 +4,7 @@ const nextConfig = {
   output: 'standalone',
   experimental: {
     serverComponentsExternalPackages: ['mongoose', 'bcryptjs'],
+    instrumentationHook: true,
   },
 };
 

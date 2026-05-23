@@ -4,7 +4,6 @@ function resolveJwtSecret(): string {
   const fromEnv = process.env.JWT_SECRET;
   if (fromEnv && fromEnv.length > 0) return fromEnv;
   if (process.env.NODE_ENV === 'production') {
-    // Throw lazily at request time, not at module load / build time.
     throw new Error(
       'Missing required environment variable: JWT_SECRET. Set it before starting the server.'
     );
@@ -13,8 +12,15 @@ function resolveJwtSecret(): string {
 }
 
 export const env = {
-  get MONGODB_URI(): string {
-    return process.env.MONGODB_URI ?? 'mongodb://localhost:27017/vps-monitoring';
+  get DATABASE_URL(): string {
+    const url = process.env.DATABASE_URL;
+    if (!url) {
+      if (process.env.NODE_ENV === 'production') {
+        throw new Error('Missing required environment variable: DATABASE_URL');
+      }
+      return 'postgres://vpsmon:vpsmon@localhost:5432/vpsmon';
+    }
+    return url;
   },
   get JWT_SECRET(): string {
     return resolveJwtSecret();
@@ -24,5 +30,8 @@ export const env = {
   },
   get AGENT_OFFLINE_AFTER_SECONDS(): number {
     return Number(process.env.AGENT_OFFLINE_AFTER_SECONDS ?? 60);
+  },
+  get CRON_SECRET(): string {
+    return process.env.CRON_SECRET ?? 'dev-cron-secret';
   },
 };

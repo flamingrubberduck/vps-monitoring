@@ -6,6 +6,9 @@ import { useRouter } from 'next/navigation';
 import { useState } from 'react';
 import {
   ArrowLeft,
+  Box,
+  ChevronDown,
+  ChevronRight,
   Cpu,
   HardDrive,
   Loader2,
@@ -51,6 +54,7 @@ interface AgentDetail {
     swapTotalBytes: number;
     diskUsedBytes: number;
     diskTotalBytes: number;
+    extraDisks: Array<{ mount: string; usedBytes: number; totalBytes: number }>;
     netRxBps: number;
     netTxBps: number;
     uptimeSeconds: number;
@@ -73,6 +77,38 @@ interface MetricPoint {
   loadAvg1: number;
 }
 
+interface PortBinding { hostIp: string; hostPort: string; containerPort: string; protocol: string }
+interface VolumeMount { source: string; destination: string; mode: string }
+interface ContainerNetwork { name: string; ipAddress: string }
+
+interface ContainerRow {
+  containerId: string;
+  name: string;
+  image: string;
+  status: string;
+  cpuPercent: number;
+  memUsedBytes: number;
+  memLimitBytes: number;
+  netRxBytes: number;
+  netTxBytes: number;
+  blockReadBytes: number;
+  blockWriteBytes: number;
+  restartCount: number;
+  time: string;
+  // Static config — null if agent hasn't sent details yet
+  command: string | null;
+  imageId: string | null;
+  createdAt: string | null;
+  restartPolicy: string | null;
+  networkMode: string | null;
+  ports: PortBinding[] | null;
+  volumes: VolumeMount[] | null;
+  envVars: string[] | null;
+  labels: Record<string, string> | null;
+  networks: ContainerNetwork[] | null;
+  firstSeenAt: string | null;
+}
+
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
 
 const RANGES = [
@@ -87,6 +123,7 @@ export function ServerDetailClient({ agentId }: { agentId: string }) {
   const [range, setRange] = useState('1h');
   const [renameOpen, setRenameOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [expandedContainer, setExpandedContainer] = useState<string | null>(null);
 
   const { data, isLoading, mutate } = useSWR<{ agent: AgentDetail }>(
     `/api/agents/${agentId}`,
@@ -98,9 +135,15 @@ export function ServerDetailClient({ agentId }: { agentId: string }) {
     fetcher,
     { refreshInterval: 10000 }
   );
+  const { data: containersData } = useSWR<{ containers: ContainerRow[] }>(
+    `/api/agents/${agentId}/containers`,
+    fetcher,
+    { refreshInterval: 10000 }
+  );
 
   const agent = data?.agent;
   const metrics = metricsData?.metrics ?? [];
+  const containers = containersData?.containers ?? [];
 
   const performDelete = async () => {
     const res = await fetch(`/api/agents/${agentId}`, { method: 'DELETE' });
@@ -320,6 +363,80 @@ export function ServerDetailClient({ agentId }: { agentId: string }) {
         </div>
       </div>
 
+      {containers.length > 0 && (
+        <div className="card overflow-hidden">
+          <div className="flex items-center gap-2 border-b border-border px-5 py-4">
+            <Box className="h-4 w-4 text-ink-muted" />
+            <h2 className="text-base font-semibold text-ink">Docker containers</h2>
+            <span className="ml-auto text-xs text-ink-soft">{containers.length} container{containers.length !== 1 ? 's' : ''}</span>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-border bg-bg-muted/40 text-[11px] uppercase tracking-wider text-ink-soft">
+                  <th className="w-6 px-2 py-2.5" />
+                  <th className="px-4 py-2.5 text-left font-medium">Name</th>
+                  <th className="px-4 py-2.5 text-left font-medium">Image</th>
+                  <th className="px-4 py-2.5 text-left font-medium">Status</th>
+                  <th className="px-4 py-2.5 text-right font-medium">CPU</th>
+                  <th className="px-4 py-2.5 text-right font-medium">Memory</th>
+                  <th className="px-4 py-2.5 text-right font-medium">Net I/O</th>
+                  <th className="px-4 py-2.5 text-right font-medium">Restarts</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border">
+                {containers.map((c) => {
+                  const memPct = c.memLimitBytes > 0 ? (c.memUsedBytes / c.memLimitBytes) * 100 : 0;
+                  const isRunning = c.status === 'running';
+                  const isExpanded = expandedContainer === c.containerId;
+                  const hasDetails = c.command !== null;
+                  return (
+                    <>
+                      <tr
+                        key={c.containerId}
+                        className={`${hasDetails ? 'cursor-pointer' : ''} hover:bg-bg-muted/30`}
+                        onClick={() => hasDetails && setExpandedContainer(isExpanded ? null : c.containerId)}
+                      >
+                        <td className="px-2 py-3 text-ink-soft">
+                          {hasDetails && (isExpanded
+                            ? <ChevronDown className="h-3.5 w-3.5" />
+                            : <ChevronRight className="h-3.5 w-3.5" />)}
+                        </td>
+                        <td className="px-4 py-3 font-mono text-xs text-ink">{c.name}</td>
+                        <td className="max-w-[180px] truncate px-4 py-3 font-mono text-xs text-ink-soft">{c.image}</td>
+                        <td className="px-4 py-3">
+                          <span className={`chip text-[10px] ${isRunning ? 'chip-success' : 'chip-muted'}`}>
+                            {c.status}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3 text-right text-ink">{c.cpuPercent.toFixed(1)}%</td>
+                        <td className="px-4 py-3 text-right text-ink">
+                          {formatBytes(c.memUsedBytes)}
+                          {c.memLimitBytes > 0 && (
+                            <span className="ml-1 text-ink-soft">/ {formatBytes(c.memLimitBytes)} ({memPct.toFixed(0)}%)</span>
+                          )}
+                        </td>
+                        <td className="px-4 py-3 text-right text-xs text-ink">
+                          ↓{formatBytes(c.netRxBytes)} ↑{formatBytes(c.netTxBytes)}
+                        </td>
+                        <td className="px-4 py-3 text-right text-ink">{c.restartCount}</td>
+                      </tr>
+                      {isExpanded && hasDetails && (
+                        <tr key={`${c.containerId}-detail`} className="bg-bg-soft/60">
+                          <td colSpan={8} className="px-6 pb-5 pt-3">
+                            <ContainerDetail c={c} />
+                          </td>
+                        </tr>
+                      )}
+                    </>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <div className="card card-pad">
           <h3 className="mb-4 text-base font-semibold text-ink">System info</h3>
@@ -370,6 +487,17 @@ export function ServerDetailClient({ agentId }: { agentId: string }) {
                 latest?.diskTotalBytes ?? agent.totalDiskBytes
               )}`}
             />
+            {(latest?.extraDisks ?? []).map((d) => {
+              const pct = percent(d.usedBytes, d.totalBytes);
+              return (
+                <UsageBar
+                  key={d.mount}
+                  value={pct}
+                  label={`Disk (${d.mount})`}
+                  hint={`${formatBytes(d.usedBytes)} / ${formatBytes(d.totalBytes)}`}
+                />
+              );
+            })}
           </div>
 
           <div className="mt-6 rounded-xl border border-border bg-bg-soft/40 p-4">
@@ -484,6 +612,116 @@ function Row({
     <div className="flex flex-col gap-0.5">
       <dt className="text-[11px] uppercase tracking-wider text-ink-soft">{label}</dt>
       <dd className={`truncate text-ink ${mono ? 'font-mono text-sm' : ''}`}>{value}</dd>
+    </div>
+  );
+}
+
+function ContainerDetail({ c }: { c: ContainerRow }) {
+  return (
+    <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+      {/* Left column — identity + config */}
+      <div className="space-y-3 text-xs">
+        <DetailRow label="Container ID" value={c.containerId} mono />
+        <DetailRow label="Image ID"     value={c.imageId ?? '—'} mono />
+        <DetailRow label="Created"      value={c.createdAt ? timeAgo(c.createdAt) : '—'} />
+        <DetailRow label="Command"      value={c.command || '—'} mono />
+        <DetailRow label="Restart policy" value={c.restartPolicy || 'no'} />
+        <DetailRow label="Network mode"   value={c.networkMode || '—'} />
+
+        {/* Ports */}
+        {c.ports && c.ports.length > 0 && (
+          <div>
+            <div className="mb-1 text-[11px] uppercase tracking-wider text-ink-soft">Ports</div>
+            <div className="space-y-0.5 font-mono">
+              {c.ports.map((p, i) => (
+                <div key={i} className="text-ink">
+                  {p.hostIp && p.hostIp !== '0.0.0.0' ? `${p.hostIp}:` : ''}{p.hostPort}→{p.containerPort}/{p.protocol}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Networks */}
+        {c.networks && c.networks.length > 0 && (
+          <div>
+            <div className="mb-1 text-[11px] uppercase tracking-wider text-ink-soft">Networks</div>
+            <div className="space-y-0.5">
+              {c.networks.map((n, i) => (
+                <div key={i} className="font-mono text-ink">
+                  {n.name}{n.ipAddress ? ` — ${n.ipAddress}` : ''}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Right column — volumes, labels, env vars */}
+      <div className="space-y-3 text-xs">
+        {/* Volumes */}
+        {c.volumes && c.volumes.length > 0 && (
+          <div>
+            <div className="mb-1 text-[11px] uppercase tracking-wider text-ink-soft">Volumes</div>
+            <div className="space-y-0.5">
+              {c.volumes.map((v, i) => (
+                <div key={i} className="font-mono text-ink">
+                  <span className="text-ink-muted">{v.source || '(anonymous)'}</span>
+                  {' → '}{v.destination}
+                  {v.mode && v.mode !== 'rw' && <span className="ml-1 text-ink-soft">({v.mode})</span>}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Labels */}
+        {c.labels && Object.keys(c.labels).length > 0 && (
+          <div>
+            <div className="mb-1 text-[11px] uppercase tracking-wider text-ink-soft">Labels</div>
+            <div className="space-y-0.5 font-mono">
+              {Object.entries(c.labels).map(([k, v]) => (
+                <div key={k} className="flex gap-1 text-ink">
+                  <span className="text-ink-muted shrink-0">{k}=</span>
+                  <span className="break-all">{v}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Env vars */}
+        {c.envVars && c.envVars.length > 0 && (
+          <div>
+            <div className="mb-1 text-[11px] uppercase tracking-wider text-ink-soft">
+              Environment variables
+              <span className="ml-1 normal-case text-ink-soft">({c.envVars.length})</span>
+            </div>
+            <div className="max-h-48 space-y-0.5 overflow-y-auto rounded-lg border border-border bg-bg-muted/40 p-2 font-mono">
+              {c.envVars.map((e, i) => {
+                const eqIdx = e.indexOf('=');
+                const key = eqIdx > -1 ? e.slice(0, eqIdx) : e;
+                const val = eqIdx > -1 ? e.slice(eqIdx + 1) : '';
+                return (
+                  <div key={i} className="flex gap-1 text-ink">
+                    <span className="text-ink-muted shrink-0">{key}=</span>
+                    <span className="break-all">{val}</span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function DetailRow({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <div className="flex flex-col gap-0.5">
+      <div className="text-[11px] uppercase tracking-wider text-ink-soft">{label}</div>
+      <div className={`break-all text-ink ${mono ? 'font-mono' : ''}`}>{value}</div>
     </div>
   );
 }

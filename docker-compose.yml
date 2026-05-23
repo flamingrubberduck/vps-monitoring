@@ -1,15 +1,17 @@
-# Bundled Mongo is optional. For Atlas / another server, set MONGODB_URI in .env and run:
-#   docker compose up -d --no-deps web
 version: "3.9"
 
 services:
-  mongo:
-    image: mongo:7
+  db:
+    image: timescale/timescaledb:latest-pg16
     restart: unless-stopped
+    environment:
+      POSTGRES_DB:       ${POSTGRES_DB:-vpsmon}
+      POSTGRES_USER:     ${POSTGRES_USER:-vpsmon}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Please set POSTGRES_PASSWORD in .env}
     volumes:
-      - mongo_data:/data/db
+      - db_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-vpsmon}"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -18,16 +20,16 @@ services:
     build: .
     restart: unless-stopped
     depends_on:
-      mongo:
+      db:
         condition: service_healthy
     environment:
-      # Override in .env for external Mongo (Atlas, VPS, …). Default = service name `mongo` in this file.
-      MONGODB_URI: ${MONGODB_URI:-mongodb://mongo:27017/vps-monitoring}
-      JWT_SECRET: ${JWT_SECRET:?Please set JWT_SECRET in .env}
-      NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:-http://localhost:3000}
-      AGENT_OFFLINE_AFTER_SECONDS: ${AGENT_OFFLINE_AFTER_SECONDS:-60}
+      DATABASE_URL:               ${DATABASE_URL:-postgres://vpsmon:${POSTGRES_PASSWORD}@db:5432/vpsmon}
+      JWT_SECRET:                 ${JWT_SECRET:?Please set JWT_SECRET in .env}
+      NEXT_PUBLIC_APP_URL:        ${NEXT_PUBLIC_APP_URL:-http://localhost:3000}
+      AGENT_OFFLINE_AFTER_SECONDS:${AGENT_OFFLINE_AFTER_SECONDS:-60}
+      CRON_SECRET:                ${CRON_SECRET:?Please set CRON_SECRET in .env}
     ports:
       - "${PORT:-3000}:3000"
 
 volumes:
-  mongo_data:
+  db_data:

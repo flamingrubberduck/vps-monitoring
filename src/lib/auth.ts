@@ -11,7 +11,8 @@ const getSecret = (): Uint8Array => new TextEncoder().encode(env.JWT_SECRET);
 export interface SessionPayload {
   sub: string;
   username: string;
-  role: 'admin';
+  teamId: string;
+  role: 'owner' | 'admin' | 'viewer';
 }
 
 export async function hashPassword(plain: string): Promise<string> {
@@ -33,10 +34,14 @@ export async function signSession(payload: SessionPayload): Promise<string> {
 export async function verifySession(token: string): Promise<SessionPayload | null> {
   try {
     const { payload } = await jwtVerify(token, getSecret());
+    const p = payload as Record<string, unknown>;
+    const role = String(p.role);
+    if (role !== 'owner' && role !== 'admin' && role !== 'viewer') return null;
     return {
-      sub: String(payload.sub),
-      username: String((payload as Record<string, unknown>).username),
-      role: 'admin',
+      sub:      String(payload.sub),
+      username: String(p.username),
+      teamId:   String(p.teamId),
+      role,
     };
   } catch {
     return null;
